@@ -1,0 +1,22 @@
+{
+  "name": "cpr-portal-auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@node-saml/node-saml": "^5.2.0",
+    "express": "^5.3.0",
+    "openid-client": "^6.9.1"
+  },
+  "devDependencies": {
+    "jose": "^6.2.18",
+    "xml-crypto": "^6.4.0"
+  }
+}
