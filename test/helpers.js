@@ -96,3 +96,82 @@ export async function startMockOidc({ clientId }) {
     },
   };
 }
+
+// ---- SAML test IdP -------------------------------------------------------
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { inflateRawSync } from 'node:zlib';
+import { SignedXml } from 'xml-crypto';
+
+export function makeKeyAndCert(cn = 'test-idp') {
+  const dir = mkdtempSync(join(tmpdir(), 'cpr-cert-'));
+  try {
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+      '-keyout', join(dir, 'k.pem'), '-out', join(dir, 'c.pem'), '-subj', `/CN=${cn}`,
+    ], { stdio: 'ignore' });
+    return { privateKey: readFileSync(join(dir, 'k.pem'), 'utf8'), cert: readFileSync(join(dir, 'c.pem'), 'utf8') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+export function parseAuthnRequest(redirectUrl) {
+  const q = new URL(redirectUrl).searchParams;
+  const xml = inflateRawSync(Buffer.from(q.get('SAMLRequest'), 'base64')).toString('utf8');
+  return {
+    xml,
+    id: /ID="([^"]+)"/.exec(xml)[1],
+    issuer: />([^<]+)<\/saml:Issuer>/.exec(xml)?.[1],
+    relayState: q.get('RelayState'),
+    params: q,
+  };
+}
+
+const iso = (ms) => new Date(ms).toISOString();
+
+export function buildSamlResponse({
+  keys, idpEntityId, spEntityId, acsUrl, inResponseTo, nameId = 'user-1', attributes = {},
+  audience = spEntityId, notBeforeMs = Date.now() - 60_000, notOnOrAfterMs = Date.now() + 5 * 60_000,
+  assertionId = `_a${randomUUID()}`, sign = true, signKey = keys.privateKey,
+}) {
+  const attrXml = Object.entries(attributes)
+    .map(([k, v]) => `<saml:Attribute Name="${k}"><saml:AttributeValue>${v}</saml:AttributeValue></saml:Attribute>`)
+    .join('');
+  const now = Date.now();
+  let assertion =
+    `<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${assertionId}" Version="2.0" IssueInstant="${iso(now)}">` +
+    `<saml:Issuer>${idpEntityId}</saml:Issuer>` +
+    `<saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified">${nameId}</saml:NameID>` +
+    `<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="${inResponseTo}" NotOnOrAfter="${iso(notOnOrAfterMs)}" Recipient="${acsUrl}"/></saml:SubjectConfirmation></saml:Subject>` +
+    `<saml:Conditions NotBefore="${iso(notBeforeMs)}" NotOnOrAfter="${iso(notOnOrAfterMs)}"><saml:AudienceRestriction><saml:Audience>${audience}</saml:Audience></saml:AudienceRestriction></saml:Conditions>` +
+    `<saml:AuthnStatement AuthnInstant="${iso(now)}" SessionIndex="_s1"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>` +
+    `<saml:AttributeStatement>${attrXml}</saml:AttributeStatement></saml:Assertion>`;
+
+  if (sign) {
+    const sig = new SignedXml({
+      privateKey: signKey,
+      publicCert: keys.cert,
+      signatureAlgorithm: 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+      canonicalizationAlgorithm: 'http://www.w3.org/2001/10/xml-exc-c14n#',
+    });
+    sig.addReference({
+      xpath: "//*[local-name(.)='Assertion']",
+      transforms: [
+        'http://www.w3.org/2000/09/xmldsig#enveloped-signature',
+        'http://www.w3.org/2001/10/xml-exc-c14n#',
+      ],
+      digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
+    });
+    sig.computeSignature(assertion, { location: { reference: "//*[local-name(.)='Issuer']", action: 'after' } });
+    assertion = sig.getSignedXml();
+  }
+
+  const response =
+    `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r${randomUUID()}" Version="2.0" IssueInstant="${iso(now)}" Destination="${acsUrl}" InResponseTo="${inResponseTo}">` +
+    `<saml:Issuer xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">${idpEntityId}</saml:Issuer>` +
+    `<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>${assertion}</samlp:Response>`;
+  return Buffer.from(response).toString('base64');
+}
