@@ -4,6 +4,9 @@ import { createSessions, createTransactions } from './sessions.js';
 import { createGoogleRouter } from './google.js';
 import { createSamlRouter } from './saml.js';
 import { createIdpStore } from './idps.js';
+import { createAdminRouter } from './admin.js';
+import { createPagesRouter } from './pages.js';
+import { fileURLToPath } from 'node:url';
 
 export function createApp({ config, db, audit = createAudit() }) {
   const app = express();
@@ -25,8 +28,17 @@ export function createApp({ config, db, audit = createAudit() }) {
   const idps = createIdpStore(db, { allowInsecureHttp: config.allowInsecureHttp });
   const deps = { config, db, audit, sessions, transactions, idps };
 
+  app.use('/static', express.static(fileURLToPath(new URL('../public', import.meta.url)), { index: false }));
+  app.use(createPagesRouter(deps));
   app.use(createGoogleRouter(deps));
   app.use(createSamlRouter(deps));
+  app.use(createAdminRouter(deps));
+
+  app.use((err, req, res, next) => {
+    audit({ event: 'internal_error', level: 'error', path: req.path, error: err?.name });
+    if (res.headersSent) return next(err);
+    res.status(500).type('text/plain').send('Something went wrong.');
+  });
 
   return app;
 }
